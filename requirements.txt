@@ -1,0 +1,18 @@
+# Ralph Tree - Core dependencies (none required for basic usage)
+# Ralph Tree works with Python 3.8+ standard library only
+
+# AI Context Engine (optional - for ralph_context.py)
+# These enable semantic search and file summarization using local models
+chromadb>=0.4.0
+ollama>=0.1.0
+sentence-transformers>=2.2.0  # For reranking with bge-reranker-large (~2GB download, runs on CPU/GPU)
+
+# MCP Server (optional - for ralph_context_mcp.py)
+# Exposes codebase search as tools for Claude Code
+mcp>=1.0.0
+
+# Note: You also need Ollama installed and running
+# Install: https://ollama.com/download
+# Then pull models:
+#   ollama pull nomic-embed-text     # For embeddings (768 dims, better quality)
+#   ollama pull qwen2.5-coder:7b     # For summaries (code-specialized, fits 12GB VRAM)

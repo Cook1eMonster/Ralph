@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Project files (user-specific)
+tree.json
+requirements.md
+progress.txt
+config.json
+workers.json
+
+# AI Context (local index - can be large)
+.ralph_context/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Claude Code (user-specific)
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

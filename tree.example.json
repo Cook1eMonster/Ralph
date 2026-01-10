@@ -1,0 +1,42 @@
+{
+  "name": "My Project",
+  "context": "A web app for managing tasks. Tech stack: React, FastAPI, PostgreSQL.",
+  "children": [
+    {
+      "name": "Backend API",
+      "context": "FastAPI with SQLAlchemy. All endpoints return JSON.",
+      "children": [
+        {
+          "name": "Create Task model with id, title, status, created_at fields",
+          "files": ["app/models/task.py"],
+          "acceptance": ["pytest", "mypy app/"],
+          "status": "pending"
+        },
+        {
+          "name": "Add CRUD endpoints for tasks at /api/tasks",
+          "files": ["app/api/tasks.py"],
+          "acceptance": ["pytest", "curl test"],
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "name": "Frontend",
+      "context": "React with TypeScript. Use Tailwind for styling.",
+      "children": [
+        {
+          "name": "Create TaskCard component showing title and status badge",
+          "files": ["src/components/TaskCard.tsx"],
+          "acceptance": ["npm run typecheck", "npm test"],
+          "status": "pending"
+        },
+        {
+          "name": "Build TaskList page fetching from /api/tasks",
+          "files": ["src/pages/TaskList.tsx"],
+          "acceptance": ["npm run typecheck"],
+          "status": "pending"
+        }
+      ]
+    }
+  ]
+}
