@@ -21,6 +21,7 @@ REQUIREMENTS_FILE = "requirements.md"
 PROGRESS_FILE = "progress.txt"
 CONFIG_FILE = "config.json"
 WORKERS_FILE = "workers.json"
+SLICE_REVIEW_FILE = "slice_review.md"
 
 # Token estimation constants
 TARGET_TOKENS = 100000
@@ -146,8 +147,74 @@ def get_status(node: dict) -> str:
     return node.get("status", "pending")
 
 
-def find_next_task(node: dict, path: list[str] = None) -> Optional[tuple[dict, list[str]]]:
-    """Find next pending leaf task via depth-first traversal."""
+def is_slice(node: dict) -> bool:
+    """Check if node is a functional slice (has slice field or name starts with 'Slice')."""
+    return node.get("slice") is True or node.get("name", "").lower().startswith("slice")
+
+
+def get_slice_order(node: dict) -> int:
+    """Get slice execution order (lower = earlier)."""
+    return node.get("order", 999)
+
+
+def find_current_slice(tree: dict) -> Optional[dict]:
+    """
+    Find the current active slice (first non-done slice in order).
+    Slices are nodes with slice=True or name starting with 'Slice'.
+    """
+    slices = []
+
+    def collect_slices(node: dict):
+        if is_slice(node):
+            slices.append(node)
+        for child in node.get("children", []):
+            collect_slices(child)
+
+    collect_slices(tree)
+
+    # Sort by order
+    slices.sort(key=get_slice_order)
+
+    # Return first non-done slice
+    for s in slices:
+        if get_status(s) != "done":
+            return s
+
+    return None
+
+
+def get_slice_tasks(slice_node: dict) -> list[dict]:
+    """Get all leaf tasks within a slice."""
+    tasks = []
+
+    def collect_tasks(node: dict):
+        if is_leaf(node):
+            tasks.append(node)
+        else:
+            for child in node.get("children", []):
+                collect_tasks(child)
+
+    for child in slice_node.get("children", []):
+        collect_tasks(child)
+
+    return tasks
+
+
+def is_slice_complete(slice_node: dict) -> bool:
+    """Check if all tasks in a slice are done."""
+    tasks = get_slice_tasks(slice_node)
+    return all(get_status(t) == "done" for t in tasks) if tasks else False
+
+
+def count_slice_progress(slice_node: dict) -> tuple[int, int]:
+    """Count (done, total) tasks in a slice."""
+    tasks = get_slice_tasks(slice_node)
+    done = sum(1 for t in tasks if get_status(t) == "done")
+    return (done, len(tasks))
+
+
+def find_next_task_in_node(node: dict, path: list[str] = None) -> Optional[tuple[dict, list[str]]]:
+    """Find next pending leaf task via depth-first traversal within a node."""
     if path is None:
         path = []
 
@@ -159,15 +226,36 @@ def find_next_task(node: dict, path: list[str] = None) -> Optional[tuple[dict, l
         return None
 
     for child in node.get("children", []):
-        result = find_next_task(child, current_path)
+        result = find_next_task_in_node(child, current_path)
         if result:
             return result
 
     return None
 
 
-def find_n_tasks(node: dict, n: int, path: list[str] = None, found: list = None) -> list:
-    """Find up to N pending leaf tasks."""
+def find_next_task(tree: dict, path: list[str] = None) -> Optional[tuple[dict, list[str]]]:
+    """
+    Find next pending task, respecting slice boundaries.
+    Only returns tasks from the current active slice.
+    If no slices defined, falls back to depth-first traversal.
+    """
+    # Check if tree uses slices
+    current_slice = find_current_slice(tree)
+
+    if current_slice:
+        # Find next task within the current slice
+        for child in current_slice.get("children", []):
+            result = find_next_task_in_node(child, [tree.get("name", "root"), current_slice.get("name", "slice")])
+            if result:
+                return result
+        return None
+    else:
+        # No slices defined, use traditional depth-first
+        return find_next_task_in_node(tree, path)
+
+
+def find_n_tasks_in_node(node: dict, n: int, path: list[str] = None, found: list = None) -> list:
+    """Find up to N pending leaf tasks within a node."""
     if path is None:
         path = []
     if found is None:
@@ -184,11 +272,30 @@ def find_n_tasks(node: dict, n: int, path: list[str] = None, found: list = None)
         return found
 
     for child in node.get("children", []):
-        find_n_tasks(child, n, current_path, found)
+        find_n_tasks_in_node(child, n, current_path, found)
         if len(found) >= n:
             break
 
     return found
+
+
+def find_n_tasks(tree: dict, n: int) -> list:
+    """
+    Find up to N pending tasks, respecting slice boundaries.
+    Only returns tasks from the current active slice.
+    """
+    current_slice = find_current_slice(tree)
+
+    if current_slice:
+        found = []
+        base_path = [tree.get("name", "root"), current_slice.get("name", "slice")]
+        for child in current_slice.get("children", []):
+            find_n_tasks_in_node(child, n, base_path, found)
+            if len(found) >= n:
+                break
+        return found
+    else:
+        return find_n_tasks_in_node(tree, n)
 
 
 def build_context(tree: dict, path: list[str]) -> str:
@@ -325,10 +432,41 @@ def print_tree(node: dict, indent: int = 0) -> None:
 def cmd_next(use_ai_context: bool = False) -> None:
     """Show next task to execute."""
     tree = load_tree()
+
+    # Check if using slices
+    current_slice = find_current_slice(tree)
+
+    if current_slice:
+        # Check if slice is complete (no more tasks)
+        done, total = count_slice_progress(current_slice)
+
+        if done == total and total > 0:
+            print("=" * 60)
+            print(f"SLICE COMPLETE: {current_slice.get('name')}")
+            print("=" * 60)
+            print(f"All {total} tasks in this slice are done!")
+            print()
+            print("Next steps:")
+            print("  1. python ralph_tree.py slice-validate  # Run integration tests")
+            print("  2. python ralph_tree.py slice-review    # Strategic review")
+            print("  3. python ralph_tree.py slice-done      # Proceed to next slice")
+            return
+
+        # Show slice context header
+        print("=" * 60)
+        print(f"CURRENT SLICE: {current_slice.get('name')}")
+        print(f"Progress: {done}/{total} tasks ({done/total*100:.0f}%)" if total > 0 else "Progress: 0/0 tasks")
+        print("=" * 60)
+        print()
+
     result = find_next_task(tree)
 
     if not result:
-        print("All tasks complete!")
+        if current_slice:
+            print("All tasks in current slice complete!")
+            print("Run: python ralph_tree.py slice-validate")
+        else:
+            print("All tasks complete!")
         return
 
     task, path = result
@@ -890,6 +1028,346 @@ def cmd_validate() -> None:
     print("=" * 60)
 
 
+# =============================================================================
+# FUNCTIONAL SLICE COMMANDS
+# =============================================================================
+
+def cmd_slice_status() -> None:
+    """
+    Show status of all slices and current slice progress.
+    """
+    tree = load_tree()
+    current_slice = find_current_slice(tree)
+
+    # Collect all slices
+    slices = []
+
+    def collect_slices(node: dict, path: list[str] = None):
+        if path is None:
+            path = []
+        current_path = path + [node.get("name", "unnamed")]
+
+        if is_slice(node):
+            done, total = count_slice_progress(node)
+            slices.append({
+                "node": node,
+                "path": current_path,
+                "done": done,
+                "total": total,
+                "order": get_slice_order(node),
+                "status": get_status(node)
+            })
+
+        for child in node.get("children", []):
+            collect_slices(child, current_path)
+
+    collect_slices(tree)
+
+    if not slices:
+        print("No functional slices defined in tree.")
+        print("\nTo use slices, add 'slice: true' to branch nodes or name them 'Slice N: ...'")
+        print("Example:")
+        print("""  {
+    "name": "Slice 1: User Authentication",
+    "slice": true,
+    "order": 1,
+    "validation": ["pytest tests/auth/"],
+    "children": [...]
+  }""")
+        return
+
+    # Sort by order
+    slices.sort(key=lambda s: s["order"])
+
+    print("=" * 70)
+    print("FUNCTIONAL SLICES")
+    print("=" * 70)
+
+    for s in slices:
+        node = s["node"]
+        is_current = current_slice and node.get("name") == current_slice.get("name")
+        status_icon = "▶" if is_current else " "
+
+        if s["status"] == "done":
+            progress_bar = "[████████████████████] 100%"
+        elif s["total"] > 0:
+            pct = s["done"] / s["total"]
+            filled = int(pct * 20)
+            progress_bar = f"[{'█' * filled}{'░' * (20 - filled)}] {pct * 100:.0f}%"
+        else:
+            progress_bar = "[░░░░░░░░░░░░░░░░░░░░] 0%"
+
+        print(f"{status_icon} {node.get('name')[:50]}")
+        print(f"  {progress_bar}  ({s['done']}/{s['total']} tasks)")
+
+        if node.get("validation"):
+            print(f"  Validation: {', '.join(node['validation'][:2])}")
+        print()
+
+    if current_slice:
+        print("=" * 70)
+        print(f"CURRENT SLICE: {current_slice.get('name')}")
+        print("=" * 70)
+        done, total = count_slice_progress(current_slice)
+        remaining = total - done
+        print(f"  Tasks: {done}/{total} done, {remaining} remaining")
+
+        if remaining == 0:
+            print()
+            print("  ✓ All tasks complete! Ready for slice validation.")
+            print("  Run: python ralph_tree.py slice-validate")
+    else:
+        print("All slices complete!")
+
+
+def cmd_slice_validate() -> None:
+    """
+    Validate the current slice (run slice-level integration tests).
+    Called after all tasks in a slice are done.
+    """
+    tree = load_tree()
+    current_slice = find_current_slice(tree)
+
+    if not current_slice:
+        print("No active slice to validate.")
+        print("All slices may be complete, or no slices defined.")
+        return
+
+    # Check if all tasks in slice are done
+    done, total = count_slice_progress(current_slice)
+    if done < total:
+        print(f"Slice not complete: {done}/{total} tasks done")
+        print(f"Complete remaining {total - done} tasks first.")
+        print("\nRun: python ralph_tree.py next")
+        return
+
+    validation = current_slice.get("validation", [])
+    slice_name = current_slice.get("name", "unnamed")
+
+    print("=" * 70)
+    print(f"VALIDATING SLICE: {slice_name}")
+    print("=" * 70)
+
+    if not validation:
+        print("No validation criteria defined for this slice.")
+        print("\nAdd 'validation' field to the slice:")
+        print('  "validation": ["pytest tests/feature/", "npm run test:feature"]')
+        print()
+        print("Proceeding to slice review...")
+        print("Run: python ralph_tree.py slice-review")
+        return
+
+    all_passed = True
+    results = []
+
+    for cmd in validation:
+        print(f"\n$ {cmd}")
+        try:
+            completed = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=600  # 10 minute timeout for slice validation
+            )
+            passed = completed.returncode == 0
+            output = completed.stdout + completed.stderr
+            if passed:
+                print(f"  ✓ PASSED")
+            else:
+                print(f"  ✗ FAILED (exit code {completed.returncode})")
+                # Show first few lines of error
+                error_lines = output.strip().split("\n")[:10]
+                for line in error_lines:
+                    print(f"    {line}")
+        except subprocess.TimeoutExpired:
+            passed = False
+            output = "Command timed out after 10 minutes"
+            print(f"  ✗ TIMEOUT")
+        except Exception as e:
+            passed = False
+            output = str(e)
+            print(f"  ✗ ERROR: {e}")
+
+        results.append((cmd, passed, output))
+        if not passed:
+            all_passed = False
+
+    print()
+    print("=" * 70)
+
+    if all_passed:
+        print("✓ SLICE VALIDATION PASSED")
+        print("=" * 70)
+        print()
+        print("Next: Run slice review before proceeding to next slice:")
+        print("  python ralph_tree.py slice-review")
+    else:
+        print("✗ SLICE VALIDATION FAILED")
+        print("=" * 70)
+        print()
+        print("Fix the issues before proceeding to the next slice.")
+        print("Failed checks:")
+        for cmd, passed, output in results:
+            if not passed:
+                print(f"  - {cmd}")
+
+
+def cmd_slice_review() -> None:
+    """
+    Generate strategic review questions for the completed slice.
+    Claude asks 5-10 questions about obstacles, strategy, and next steps.
+    """
+    tree = load_tree()
+    requirements = load_requirements()
+    current_slice = find_current_slice(tree)
+
+    if not current_slice:
+        print("No active slice to review.")
+        return
+
+    slice_name = current_slice.get("name", "unnamed")
+    done, total = count_slice_progress(current_slice)
+
+    # Build context for the review prompt
+    tasks = get_slice_tasks(current_slice)
+    completed_tasks = [t for t in tasks if get_status(t) == "done"]
+
+    # Collect all slices for context
+    all_slices = []
+
+    def collect_slices(node: dict):
+        if is_slice(node):
+            all_slices.append(node)
+        for child in node.get("children", []):
+            collect_slices(child)
+
+    collect_slices(tree)
+    all_slices.sort(key=get_slice_order)
+
+    # Find next slices
+    current_order = get_slice_order(current_slice)
+    next_slices = [s for s in all_slices if get_slice_order(s) > current_order][:3]
+
+    print("=" * 70)
+    print(f"SLICE REVIEW: {slice_name}")
+    print("=" * 70)
+    print(f"Tasks completed: {done}/{total}")
+    print()
+
+    # Generate the review prompt for Claude
+    review_prompt = f"""# Slice Review: {slice_name}
+
+You just completed a functional slice. Before proceeding, review progress and strategy.
+
+## Completed in this Slice
+{chr(10).join(f"- {t.get('name')}" for t in completed_tasks)}
+
+## Project Requirements
+{requirements if requirements else "(No requirements.md found)"}
+
+## Upcoming Slices
+{chr(10).join(f"- {s.get('name')}" for s in next_slices) if next_slices else "This is the final slice."}
+
+---
+
+## REVIEW QUESTIONS
+
+Answer these questions with the user before proceeding:
+
+### Progress Assessment
+1. Did the implementation match the original intent? Any deviations?
+2. What technical debt was introduced (if any)?
+3. Are there any edge cases or error handling gaps?
+
+### Obstacles Identified
+4. What unexpected challenges came up during this slice?
+5. Are there any blockers for the next slice?
+
+### Strategy Reassessment
+6. Based on what we learned, should any upcoming tasks be:
+   - **Split** into smaller pieces?
+   - **Merged** together?
+   - **Pruned** entirely?
+   - **Reordered** for dependencies?
+
+7. Are the acceptance criteria for upcoming slices still appropriate?
+
+### User Input Needed
+8. Any requirements that need clarification before continuing?
+9. Any new features to add or scope changes?
+10. Ready to proceed to the next slice?
+
+---
+
+After discussing, run:
+  python ralph_tree.py slice-done    # Mark slice complete, proceed to next
+"""
+
+    print(review_prompt)
+
+    # Also save to file for reference
+    review_file = Path(SLICE_REVIEW_FILE)
+    review_file.write_text(review_prompt, encoding="utf-8")
+    print("=" * 70)
+    print(f"Review saved to: {SLICE_REVIEW_FILE}")
+    print()
+    print("Discuss the questions above, then:")
+    print("  python ralph_tree.py slice-done    # Complete slice, proceed to next")
+
+
+def cmd_slice_done() -> None:
+    """
+    Mark the current slice as done and proceed to the next.
+    """
+    tree = load_tree()
+    current_slice = find_current_slice(tree)
+
+    if not current_slice:
+        print("No active slice to complete.")
+        return
+
+    slice_name = current_slice.get("name", "unnamed")
+    done, total = count_slice_progress(current_slice)
+
+    if done < total:
+        print(f"Warning: {total - done} tasks still pending in this slice.")
+        print("Complete all tasks before marking the slice done.")
+        print("\nRun: python ralph_tree.py next")
+        return
+
+    # Mark the slice as done
+    current_slice["status"] = "done"
+    save_tree(tree)
+
+    print("=" * 70)
+    print(f"✓ SLICE COMPLETE: {slice_name}")
+    print("=" * 70)
+
+    # Find next slice
+    next_slice = find_current_slice(tree)
+
+    if next_slice:
+        next_done, next_total = count_slice_progress(next_slice)
+        print(f"\nNEXT SLICE: {next_slice.get('name')}")
+        print(f"  Tasks: {next_total} ({next_done} already done)")
+
+        if next_slice.get("context"):
+            print(f"\n  Context: {next_slice.get('context')[:200]}")
+
+        print()
+        print("Start working on the next slice:")
+        print("  python ralph_tree.py next")
+    else:
+        print("\n🎉 ALL SLICES COMPLETE!")
+        print()
+        print("Project appears to be done. Verify with:")
+        print("  python ralph_tree.py status")
+
+    # Auto-reindex
+    auto_reindex()
+
+
 def cmd_assign_one(worker_id: Optional[int] = None) -> None:
     """
     Assign a single task to one worker.
@@ -1131,6 +1609,659 @@ Read my codebase to check what's already done. Edit tree.json directly with your
     print("=" * 60)
 
 
+
+# =============================================================================
+# SUBAGENT EXECUTION - Fresh context execution inspired by get-shit-done
+# =============================================================================
+
+EXECUTION_LOG_FILE = "execution.log"
+
+
+def build_subagent_prompt(task: dict, path: list[str], tree: dict) -> str:
+    """
+    Build a focused prompt for a fresh subagent.
+    Only includes essential context to maximize effective token usage.
+    """
+    context = build_context(tree, path)
+    read_first = task.get("read_first", [])
+    spec = task.get("spec", "")
+    files = task.get("files", [])
+    acceptance = task.get("acceptance", [])
+
+    prompt_parts = [
+        "<task>",
+        f"  <name>{task.get('name', 'unnamed')}</name>",
+    ]
+
+    if spec:
+        prompt_parts.append(f"  <spec>{spec}</spec>")
+
+    prompt_parts.append("</task>")
+    prompt_parts.append("")
+
+    if read_first:
+        prompt_parts.append("<read_first>")
+        prompt_parts.append("MANDATORY: Read these files BEFORE writing any code to understand existing patterns:")
+        for f in read_first:
+            prompt_parts.append(f"  - {f}")
+        prompt_parts.append("</read_first>")
+        prompt_parts.append("")
+
+    if files:
+        prompt_parts.append("<files_to_modify>")
+        for f in files:
+            prompt_parts.append(f"  - {f}")
+        prompt_parts.append("</files_to_modify>")
+        prompt_parts.append("")
+
+    if acceptance:
+        prompt_parts.append("<acceptance_criteria>")
+        prompt_parts.append("ALL of these must pass before task is complete:")
+        for a in acceptance:
+            prompt_parts.append(f"  - {a}")
+        prompt_parts.append("</acceptance_criteria>")
+        prompt_parts.append("")
+
+    if context:
+        prompt_parts.append("<context>")
+        prompt_parts.append(context)
+        prompt_parts.append("</context>")
+        prompt_parts.append("")
+
+    prompt_parts.append("<instructions>")
+    prompt_parts.append("1. Read ALL files listed in read_first to understand existing patterns")
+    prompt_parts.append("2. Implement the task according to the spec")
+    prompt_parts.append("3. Follow existing code conventions and patterns exactly")
+    prompt_parts.append("4. Run acceptance criteria commands to verify your work")
+    prompt_parts.append("5. If all checks pass, commit your changes:")
+    prompt_parts.append("   git add -A && git commit -m \"" + task.get('name', 'task')[:50] + "\"")
+    prompt_parts.append("6. When complete, output: TASK_COMPLETE")
+    prompt_parts.append("7. If blocked, output: TASK_BLOCKED: <reason>")
+    prompt_parts.append("</instructions>")
+
+    return "\n".join(prompt_parts)
+
+
+def spawn_subagent(prompt: str, branch: Optional[str] = None, worker_id: int = 1,
+                   wait: bool = True, verbose: bool = False) -> dict:
+    """
+    Spawn a Claude Code subagent with fresh context.
+    """
+    config = load_config()
+    agent_cmd = config.get("agent_cmd", "claude -p")
+
+    result = {
+        "worker_id": worker_id,
+        "branch": branch,
+        "status": "unknown",
+        "output": "",
+        "exit_code": -1
+    }
+
+    # Setup git branch if specified
+    if branch:
+        try:
+            branch_check = subprocess.run(
+                ["git", "rev-parse", "--verify", branch],
+                capture_output=True, text=True
+            )
+            if branch_check.returncode != 0:
+                subprocess.run(["git", "checkout", "main"], capture_output=True)
+                subprocess.run(["git", "pull", "origin", "main"], capture_output=True)
+                subprocess.run(["git", "checkout", "-b", branch], capture_output=True)
+                print(f"  Created branch: {branch}")
+            else:
+                subprocess.run(["git", "checkout", branch], capture_output=True)
+                print(f"  Switched to branch: {branch}")
+        except Exception as e:
+            print(f"  Warning: Git branch setup failed: {e}")
+
+    cmd_parts = agent_cmd.split()
+
+    try:
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"SUBAGENT {worker_id} OUTPUT:")
+            print(f"{'='*60}\n")
+
+            process = subprocess.Popen(
+                cmd_parts + [prompt],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            output_lines = []
+            for line in iter(process.stdout.readline, ''):
+                print(line, end='')
+                output_lines.append(line)
+
+            process.wait()
+            result["output"] = "".join(output_lines)
+            result["exit_code"] = process.returncode
+
+        elif wait:
+            completed = subprocess.run(
+                cmd_parts + [prompt],
+                capture_output=True,
+                text=True,
+                timeout=3600
+            )
+            result["output"] = completed.stdout + completed.stderr
+            result["exit_code"] = completed.returncode
+
+        else:
+            process = subprocess.Popen(
+                cmd_parts + [prompt],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            result["pid"] = process.pid
+            result["status"] = "running"
+            result["exit_code"] = 0
+            return result
+
+        if "TASK_COMPLETE" in result["output"]:
+            result["status"] = "complete"
+        elif "TASK_BLOCKED" in result["output"]:
+            result["status"] = "blocked"
+        elif result["exit_code"] == 0:
+            result["status"] = "complete"
+        else:
+            result["status"] = "failed"
+
+    except subprocess.TimeoutExpired:
+        result["status"] = "timeout"
+        result["output"] = "Subagent timed out after 1 hour"
+    except FileNotFoundError:
+        result["status"] = "error"
+        result["output"] = f"Agent command not found: {agent_cmd}"
+    except Exception as e:
+        result["status"] = "error"
+        result["output"] = str(e)
+
+    log_entry = f"Worker {worker_id} | Branch: {branch} | Status: {result['status']}\n"
+    with open(EXECUTION_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(log_entry)
+
+    return result
+
+
+def run_validation(acceptance: list[str]) -> tuple[bool, list[tuple[str, bool, str]]]:
+    """
+    Run acceptance criteria commands.
+    Returns (all_passed, results) where results is list of (cmd, passed, output).
+    """
+    results = []
+    all_passed = True
+
+    for cmd in acceptance:
+        try:
+            completed = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 minute timeout per check
+            )
+            passed = completed.returncode == 0
+            output = completed.stdout + completed.stderr
+        except subprocess.TimeoutExpired:
+            passed = False
+            output = "Command timed out after 5 minutes"
+        except Exception as e:
+            passed = False
+            output = str(e)
+
+        results.append((cmd, passed, output))
+        if not passed:
+            all_passed = False
+
+    return all_passed, results
+
+
+def build_fix_prompt(task: dict, validation_results: list[tuple[str, bool, str]], attempt: int) -> str:
+    """
+    Build a prompt for a subagent to fix validation failures.
+    Includes the error output so the agent knows what to fix.
+    """
+    prompt_parts = [
+        "<fix_request>",
+        f"  <task>{task.get('name', 'unnamed')}</task>",
+        f"  <attempt>{attempt}</attempt>",
+        "</fix_request>",
+        "",
+        "<validation_failures>",
+        "The following acceptance criteria checks FAILED. Fix all issues:",
+        ""
+    ]
+
+    for cmd, passed, output in validation_results:
+        if not passed:
+            prompt_parts.append(f"<failed_check>")
+            prompt_parts.append(f"  <command>{cmd}</command>")
+            prompt_parts.append(f"  <output>")
+            # Truncate very long outputs but keep enough for context
+            truncated_output = output[:8000] if len(output) > 8000 else output
+            prompt_parts.append(truncated_output)
+            prompt_parts.append(f"  </output>")
+            prompt_parts.append(f"</failed_check>")
+            prompt_parts.append("")
+
+    prompt_parts.append("</validation_failures>")
+    prompt_parts.append("")
+
+    files = task.get("files", [])
+    if files:
+        prompt_parts.append("<files_to_check>")
+        for f in files:
+            prompt_parts.append(f"  - {f}")
+        prompt_parts.append("</files_to_check>")
+        prompt_parts.append("")
+
+    prompt_parts.append("<instructions>")
+    prompt_parts.append("1. Read the error output carefully to understand what failed")
+    prompt_parts.append("2. Read the relevant files that need fixing")
+    prompt_parts.append("3. Make the minimal changes needed to fix the errors")
+    prompt_parts.append("4. Do NOT refactor or change unrelated code")
+    prompt_parts.append("5. After fixing, commit your changes:")
+    prompt_parts.append(f"   git add -A && git commit -m \"fix: {task.get('name', 'task')[:40]} (attempt {attempt})\"")
+    prompt_parts.append("6. When complete, output: TASK_COMPLETE")
+    prompt_parts.append("7. If you cannot fix it, output: TASK_BLOCKED: <reason>")
+    prompt_parts.append("</instructions>")
+
+    return "\n".join(prompt_parts)
+
+
+def auto_merge_branch(branch: str, delete_after: bool = True) -> bool:
+    """
+    Merge a branch back to main and optionally delete it.
+    Returns True if merge succeeded.
+    """
+    try:
+        # Stash any uncommitted changes
+        subprocess.run(["git", "stash"], capture_output=True)
+
+        # Switch to main and pull latest
+        result = subprocess.run(["git", "checkout", "main"], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  Failed to checkout main: {result.stderr}")
+            return False
+
+        subprocess.run(["git", "pull", "origin", "main"], capture_output=True)
+
+        # Merge the branch
+        result = subprocess.run(["git", "merge", branch, "--no-edit"], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  Merge conflict or error: {result.stderr}")
+            # Try to abort merge
+            subprocess.run(["git", "merge", "--abort"], capture_output=True)
+            subprocess.run(["git", "checkout", branch], capture_output=True)
+            return False
+
+        # Push to remote
+        result = subprocess.run(["git", "push", "origin", "main"], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  Warning: Push failed: {result.stderr}")
+
+        # Delete branch if requested
+        if delete_after:
+            subprocess.run(["git", "branch", "-d", branch], capture_output=True)
+            subprocess.run(["git", "push", "origin", "--delete", branch], capture_output=True)
+
+        print(f"  Merged {branch} into main")
+        return True
+
+    except Exception as e:
+        print(f"  Merge error: {e}")
+        return False
+
+
+MAX_FIX_ATTEMPTS = 3  # Maximum number of fix attempts before giving up
+
+
+def cmd_execute(verbose: bool = False, auto_done: bool = False, auto_merge: bool = False, max_retries: int = MAX_FIX_ATTEMPTS) -> None:
+    """
+    Execute the next task using a fresh Claude subagent.
+    Spawns a new Claude Code process with only essential context.
+    If validation fails, spawns fix subagents to automatically resolve issues.
+    """
+    tree = load_tree()
+    result = find_next_task(tree)
+
+    if not result:
+        print("No pending tasks to execute.")
+        return
+
+    task, path = result
+    branch = task_to_branch_name(task.get("name", "task"))
+
+    print("=" * 70)
+    print("SUBAGENT EXECUTION")
+    print("=" * 70)
+    print(f"Task: {task.get('name')}")
+    print(f"Branch: {branch}")
+    print(f"Mode: {'verbose (streaming)' if verbose else 'quiet (wait for completion)'}")
+    print(f"Max fix attempts: {max_retries}")
+    print("=" * 70)
+
+    prompt = build_subagent_prompt(task, path, tree)
+    prompt_tokens = int(len(prompt) * TOKENS_PER_CHAR)
+    print(f"Prompt size: ~{prompt_tokens:,} tokens")
+    print(f"Available for work: ~{TARGET_TOKENS - prompt_tokens:,} tokens")
+    print()
+
+    task["status"] = "in-progress"
+    save_tree(tree)
+
+    print("Spawning subagent with fresh context...")
+    exec_result = spawn_subagent(
+        prompt=prompt,
+        branch=branch,
+        worker_id=1,
+        wait=True,
+        verbose=verbose
+    )
+
+    print()
+    print("=" * 70)
+    print(f"EXECUTION RESULT: {exec_result['status'].upper()}")
+    print("=" * 70)
+
+    if exec_result["status"] == "complete":
+        print("Subagent completed successfully!")
+
+        # Auto-validate if acceptance criteria defined
+        acceptance = task.get("acceptance", [])
+        validation_passed = True
+        validation_results = []
+
+        if acceptance:
+            print()
+            print("Running validation...")
+            validation_passed, validation_results = run_validation(acceptance)
+            for cmd, passed, output in validation_results:
+                status = "PASS" if passed else "FAIL"
+                print(f"  [{status}] {cmd}")
+
+            # If validation failed, spawn fix subagents
+            fix_attempt = 0
+            while not validation_passed and fix_attempt < max_retries:
+                fix_attempt += 1
+                print()
+                print("=" * 70)
+                print(f"FIX ATTEMPT {fix_attempt}/{max_retries}")
+                print("=" * 70)
+
+                # Build fix prompt with error details
+                fix_prompt = build_fix_prompt(task, validation_results, fix_attempt)
+                fix_tokens = int(len(fix_prompt) * TOKENS_PER_CHAR)
+                print(f"Fix prompt size: ~{fix_tokens:,} tokens")
+
+                print("Spawning fix subagent...")
+                fix_result = spawn_subagent(
+                    prompt=fix_prompt,
+                    branch=branch,  # Stay on same branch
+                    worker_id=1,
+                    wait=True,
+                    verbose=verbose
+                )
+
+                if fix_result["status"] == "blocked":
+                    print("Fix subagent reported blocked - cannot auto-fix")
+                    if "TASK_BLOCKED:" in fix_result["output"]:
+                        reason = fix_result["output"].split("TASK_BLOCKED:")[-1].strip()[:200]
+                        print(f"Reason: {reason}")
+                    break
+
+                if fix_result["status"] != "complete":
+                    print(f"Fix subagent failed: {fix_result['status']}")
+                    continue
+
+                # Re-run validation
+                print()
+                print("Re-running validation...")
+                validation_passed, validation_results = run_validation(acceptance)
+                for cmd, passed, output in validation_results:
+                    status = "PASS" if passed else "FAIL"
+                    print(f"  [{status}] {cmd}")
+
+            if not validation_passed:
+                print()
+                print("=" * 70)
+                print(f"VALIDATION FAILED after {fix_attempt} fix attempt(s)")
+                print("=" * 70)
+                print("Task NOT marked done. Manual intervention required.")
+                print(f"Branch: {branch}")
+                print()
+                print("Failed checks:")
+                for cmd, passed, output in validation_results:
+                    if not passed:
+                        print(f"  - {cmd}")
+                task["status"] = "pending"
+                save_tree(tree)
+                return
+
+            print()
+            print("=" * 70)
+            if fix_attempt > 0:
+                print(f"VALIDATION PASSED after {fix_attempt} fix attempt(s)")
+            else:
+                print("VALIDATION PASSED")
+            print("=" * 70)
+
+        if auto_done:
+            mark_done(tree, path)
+            save_tree(tree)
+            print(f"Task marked as done: {task.get('name')}")
+
+            # Auto-merge if requested
+            if auto_merge:
+                print()
+                print("Merging to main...")
+                if auto_merge_branch(branch):
+                    print("Branch merged and cleaned up.")
+                else:
+                    print("Auto-merge failed. Manual merge required.")
+
+            auto_reindex()
+        else:
+            print()
+            print("Next steps:")
+            print("  1. Review the changes on branch:", branch)
+            print("  2. Run: python ralph_tree.py validate")
+            print("  3. Run: python ralph_tree.py done")
+
+    elif exec_result["status"] == "blocked":
+        print("Subagent reported blocked.")
+        task["status"] = "blocked"
+        save_tree(tree)
+        if "TASK_BLOCKED:" in exec_result["output"]:
+            reason = exec_result["output"].split("TASK_BLOCKED:")[-1].strip()[:200]
+            print(f"Reason: {reason}")
+
+    elif exec_result["status"] == "failed":
+        print("Subagent failed.")
+        task["status"] = "pending"
+        save_tree(tree)
+        print(f"Exit code: {exec_result['exit_code']}")
+        if not verbose:
+            print("Run with --verbose to see full output")
+
+    elif exec_result["status"] == "timeout":
+        print("Subagent timed out (1 hour limit).")
+        task["status"] = "pending"
+        save_tree(tree)
+
+    elif exec_result["status"] == "error":
+        print(f"Error: {exec_result['output']}")
+        task["status"] = "pending"
+        save_tree(tree)
+
+
+def cmd_execute_parallel(n: int = 4, verbose: bool = False, auto_merge: bool = False) -> None:
+    """
+    Execute N tasks in parallel using fresh Claude subagents.
+    Each subagent runs on its own git branch with isolated context.
+    """
+    import concurrent.futures
+    import threading
+
+    tree = load_tree()
+    tasks = find_n_tasks(tree, n)
+
+    if not tasks:
+        print("No pending tasks to execute.")
+        return
+
+    print("=" * 70)
+    print(f"PARALLEL EXECUTION: {len(tasks)} workers")
+    print("=" * 70)
+
+    workers = []
+    for i, (task, path) in enumerate(tasks, 1):
+        branch = task_to_branch_name(task.get("name", f"task-{i}"))
+        prompt = build_subagent_prompt(task, path, tree)
+
+        workers.append({
+            "id": i,
+            "task": task,
+            "path": path,
+            "branch": branch,
+            "prompt": prompt
+        })
+
+        print(f"  Worker {i}: {task.get('name')[:50]}")
+        print(f"           Branch: {branch}")
+        task["status"] = "in-progress"
+
+    save_tree(tree)
+
+    workers_data = {
+        "workers": [
+            {
+                "id": w["id"],
+                "branch": w["branch"],
+                "task": w["task"].get("name"),
+                "path": ".".join(w["path"]),
+                "status": "running"
+            }
+            for w in workers
+        ]
+    }
+    save_workers(workers_data)
+
+    print()
+    print("=" * 70)
+    print("SPAWNING SUBAGENTS...")
+    print("=" * 70)
+
+    def execute_worker(worker: dict) -> dict:
+        result = spawn_subagent(
+            prompt=worker["prompt"],
+            branch=worker["branch"],
+            worker_id=worker["id"],
+            wait=True,
+            verbose=False
+        )
+        result["task_name"] = worker["task"].get("name")
+        result["path"] = worker["path"]
+        return result
+
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as executor:
+        future_to_worker = {
+            executor.submit(execute_worker, w): w
+            for w in workers
+        }
+
+        for future in concurrent.futures.as_completed(future_to_worker):
+            worker = future_to_worker[future]
+            try:
+                result = future.result()
+                results.append(result)
+                print(f"  Worker {result['worker_id']} finished: {result['status']}")
+            except Exception as e:
+                print(f"  Worker {worker['id']} error: {e}")
+                results.append({
+                    "worker_id": worker["id"],
+                    "status": "error",
+                    "output": str(e),
+                    "task_name": worker["task"].get("name"),
+                    "path": worker["path"],
+                    "branch": worker["branch"]
+                })
+
+    print()
+    print("=" * 70)
+    print("EXECUTION RESULTS")
+    print("=" * 70)
+
+    completed = 0
+    failed = 0
+    blocked = 0
+
+    tree = load_tree()
+
+    for result in results:
+        status_icon = {
+            "complete": "OK",
+            "failed": "FAIL",
+            "blocked": "BLOCK",
+            "error": "ERR",
+            "timeout": "TIME"
+        }.get(result["status"], "?")
+
+        print(f"  [{status_icon}] Worker {result['worker_id']}: {result['status']}")
+        print(f"        Task: {result.get('task_name', 'unknown')[:50]}")
+        print(f"        Branch: {result.get('branch', 'unknown')}")
+
+        if result["status"] == "complete":
+            mark_done(tree, result["path"])
+            completed += 1
+            if auto_merge:
+                if auto_merge_branch(result["branch"]):
+                    print(f"        Merged to main")
+        elif result["status"] == "blocked":
+            blocked += 1
+        else:
+            failed += 1
+        print()
+
+    save_tree(tree)
+
+    workers_data = load_workers()
+    for w in workers_data.get("workers", []):
+        for r in results:
+            if w["id"] == r["worker_id"]:
+                w["status"] = r["status"]
+    save_workers(workers_data)
+
+    print("=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    print(f"  Completed: {completed}")
+    print(f"  Failed: {failed}")
+    print(f"  Blocked: {blocked}")
+    print()
+
+    if completed > 0:
+        print("Completed branches to merge:")
+        for r in results:
+            if r["status"] == "complete":
+                print(f"  git merge {r['branch']}")
+        print()
+        print("Run 'python ralph_tree.py merge' for full merge instructions.")
+
+    if failed > 0 or blocked > 0:
+        print()
+        print("Failed/blocked tasks reset to pending for retry.")
+
+    auto_reindex()
+
+
 def main() -> None:
     """CLI entry point."""
     if len(sys.argv) < 2:
@@ -1146,6 +2277,18 @@ Core Commands:
   status            Show tree progress
   estimate          Show token estimates for all pending tasks
   govern            Output governance prompt for Claude
+
+Functional Slices (vertical feature slices):
+  slices            Show all slices and current slice progress
+  slice-validate    Run slice integration tests (after all tasks done)
+  slice-review      Generate 5-10 strategic review questions
+  slice-done        Mark slice complete, proceed to next slice
+
+  Slice Workflow:
+    1. Complete all tasks in current slice
+    2. slice-validate   # Run integration tests
+    3. slice-review     # Discuss strategy with user
+    4. slice-done       # Proceed to next slice
 
 AI Context (requires Ollama + ChromaDB):
   enrich            Auto-suggest read_first for all pending tasks
@@ -1165,6 +2308,15 @@ Parallel Workers (Rolling Pipeline):
   assign-one [id]   Assign ONE task to a worker (auto-ID if omitted)
   done-one <id>     Complete ONE worker, show merge instructions
 
+Autonomous Execution (spawns fresh subagents):
+  execute           Execute next task with fresh Claude subagent
+  execute --verbose Stream subagent output in real-time
+  execute --auto    Auto-validate, mark done, reindex if successful
+  execute --merge   Auto-merge branch to main after completion
+  execute --retries N  Max fix attempts if validation fails (default: 3)
+  execute-parallel <N>  Execute N tasks in parallel (default: 4)
+  execute-parallel --merge  Auto-merge all completed branches
+
 Task Fields:
   name              Task description (required)
   status            pending / in-progress / done / blocked
@@ -1174,24 +2326,36 @@ Task Fields:
   acceptance        Commands to verify completion (QA loop)
   context           Additional context for this task
 
-AI Context Setup (one-time):
-  pip install chromadb ollama
-  ollama pull nomic-embed-text
-  ollama pull codellama:13b
-  python ralph_context.py index      # Index codebase (~2 min)
+Slice Fields (for slice nodes):
+  slice             true (marks node as a functional slice)
+  order             Execution order (lower = earlier)
+  validation        Slice-level integration tests
+  dependencies      Other slices this depends on
 
-Workflow (includes code-simplifier):
-  python ralph_tree.py next          # Get task
-  # Claude reads read_first files, codes to spec
-  python ralph_tree.py validate      # Run acceptance checks
-  # "Use code-simplifier to review and simplify the code"
-  python ralph_tree.py done          # Mark complete
+Example tree.json with slices:
+  {
+    "name": "Project",
+    "children": [
+      {
+        "name": "Slice 1: User Auth",
+        "slice": true,
+        "order": 1,
+        "validation": ["pytest tests/auth/"],
+        "children": [
+          {"name": "Create User model", "status": "pending"},
+          {"name": "Add login endpoint", "status": "pending"}
+        ]
+      }
+    ]
+  }
 
-Rolling Pipeline:
-  python ralph_tree.py assign-one    # → Worker 1
-  python ralph_tree.py assign-one    # → Worker 2
-  python ralph_tree.py done-one 1    # Worker 1 finished
-  python ralph_tree.py assign-one 1  # Re-assign Worker 1
+Slice Workflow:
+  python ralph_tree.py slices         # See slice progress
+  python ralph_tree.py next           # Get next task (within current slice)
+  # ... complete all tasks in slice ...
+  python ralph_tree.py slice-validate # Run integration tests
+  python ralph_tree.py slice-review   # Review strategy
+  python ralph_tree.py slice-done     # Move to next slice
 """)
         return
 
@@ -1234,6 +2398,39 @@ Rolling Pipeline:
         cmd_add(sys.argv[2], sys.argv[3])
     elif cmd == "prune" and len(sys.argv) >= 3:
         cmd_prune(sys.argv[2])
+    elif cmd == "execute":
+        verbose = "--verbose" in sys.argv or "-v" in sys.argv
+        auto_done = "--auto" in sys.argv
+        auto_merge = "--merge" in sys.argv
+        # Parse --retries N
+        max_retries = MAX_FIX_ATTEMPTS
+        for i, arg in enumerate(sys.argv):
+            if arg == "--retries" and i + 1 < len(sys.argv):
+                try:
+                    max_retries = int(sys.argv[i + 1])
+                except ValueError:
+                    pass
+        cmd_execute(verbose=verbose, auto_done=auto_done, auto_merge=auto_merge, max_retries=max_retries)
+    elif cmd == "execute-parallel":
+        n = 4
+        for arg in sys.argv[2:]:
+            if arg.isdigit():
+                n = int(arg)
+                break
+        verbose = "--verbose" in sys.argv or "-v" in sys.argv
+        auto_merge = "--merge" in sys.argv
+        cmd_execute_parallel(n=n, verbose=verbose, auto_merge=auto_merge)
+    # Slice commands
+    elif cmd == "slices":
+        cmd_slice_status()
+    elif cmd == "slice-status":
+        cmd_slice_status()
+    elif cmd == "slice-validate":
+        cmd_slice_validate()
+    elif cmd == "slice-review":
+        cmd_slice_review()
+    elif cmd == "slice-done":
+        cmd_slice_done()
     else:
         print(f"Unknown command: {cmd}")
 

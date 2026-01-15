@@ -1,0 +1,117 @@
+{
+  "name": "My Project",
+  "context": "A web app for managing tasks. Tech stack: React, FastAPI, PostgreSQL.",
+  "children": [
+    {
+      "name": "Slice 1: User Authentication",
+      "slice": true,
+      "order": 1,
+      "context": "JWT-based auth with refresh tokens. Use bcrypt for password hashing.",
+      "validation": ["pytest tests/auth/", "npm run test -- --testPathPattern=auth"],
+      "children": [
+        {
+          "name": "Create User model with id, email, password_hash, created_at",
+          "files": ["app/models/user.py"],
+          "acceptance": ["pytest", "mypy app/"],
+          "status": "pending"
+        },
+        {
+          "name": "Add /api/auth/register endpoint with email validation",
+          "files": ["app/api/auth.py"],
+          "read_first": ["app/models/user.py"],
+          "spec": "POST /api/auth/register accepts {email, password}. Validate email format. Hash password with bcrypt. Return 201 with user data (no password).",
+          "acceptance": ["pytest tests/auth/test_register.py"],
+          "status": "pending"
+        },
+        {
+          "name": "Add /api/auth/login endpoint returning JWT",
+          "files": ["app/api/auth.py"],
+          "read_first": ["app/models/user.py", "app/api/auth.py"],
+          "spec": "POST /api/auth/login accepts {email, password}. Verify password. Return JWT access token (15min) and refresh token (7d).",
+          "acceptance": ["pytest tests/auth/test_login.py"],
+          "status": "pending"
+        },
+        {
+          "name": "Create LoginForm component with email and password fields",
+          "files": ["src/components/LoginForm.tsx"],
+          "spec": "Form with email and password inputs. Client-side validation. Submit calls /api/auth/login. Store JWT in httpOnly cookie.",
+          "acceptance": ["npm run typecheck", "npm test -- LoginForm"],
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "name": "Slice 2: Task CRUD",
+      "slice": true,
+      "order": 2,
+      "context": "Basic task management. Tasks belong to users. Use SQLAlchemy relationships.",
+      "validation": ["pytest tests/tasks/", "npm run test -- --testPathPattern=task"],
+      "dependencies": ["Slice 1: User Authentication"],
+      "children": [
+        {
+          "name": "Create Task model with id, title, description, status, user_id, created_at",
+          "files": ["app/models/task.py"],
+          "read_first": ["app/models/user.py"],
+          "spec": "Task model with foreign key to User. Status enum: pending, in_progress, done. Add relationship to User model.",
+          "acceptance": ["pytest", "mypy app/"],
+          "status": "pending"
+        },
+        {
+          "name": "Add CRUD endpoints for tasks at /api/tasks",
+          "files": ["app/api/tasks.py"],
+          "read_first": ["app/models/task.py", "app/api/auth.py"],
+          "spec": "GET /api/tasks (list user's tasks), POST /api/tasks (create), GET /api/tasks/{id}, PUT /api/tasks/{id}, DELETE /api/tasks/{id}. All require auth.",
+          "acceptance": ["pytest tests/tasks/"],
+          "status": "pending"
+        },
+        {
+          "name": "Create TaskCard component showing title, description, status badge",
+          "files": ["src/components/TaskCard.tsx"],
+          "spec": "Card component with title, truncated description, colored status badge. onClick navigates to task detail.",
+          "acceptance": ["npm run typecheck", "npm test -- TaskCard"],
+          "status": "pending"
+        },
+        {
+          "name": "Build TaskList page fetching from /api/tasks",
+          "files": ["src/pages/TaskList.tsx"],
+          "read_first": ["src/components/TaskCard.tsx"],
+          "spec": "Page fetching tasks from API. Loading state, error state, empty state. Renders TaskCard for each task.",
+          "acceptance": ["npm run typecheck"],
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "name": "Slice 3: Task Filtering & Search",
+      "slice": true,
+      "order": 3,
+      "context": "Add filtering by status and text search. Use query params.",
+      "validation": ["pytest tests/tasks/test_filter.py", "npm run test -- TaskFilter"],
+      "dependencies": ["Slice 2: Task CRUD"],
+      "children": [
+        {
+          "name": "Add query params for filtering tasks by status",
+          "files": ["app/api/tasks.py"],
+          "read_first": ["app/api/tasks.py"],
+          "spec": "GET /api/tasks?status=pending filters by status. Multiple statuses: ?status=pending&status=in_progress",
+          "acceptance": ["pytest tests/tasks/test_filter.py"],
+          "status": "pending"
+        },
+        {
+          "name": "Add text search across title and description",
+          "files": ["app/api/tasks.py"],
+          "spec": "GET /api/tasks?q=keyword searches title and description using ILIKE.",
+          "acceptance": ["pytest tests/tasks/test_search.py"],
+          "status": "pending"
+        },
+        {
+          "name": "Create TaskFilter component with status checkboxes and search input",
+          "files": ["src/components/TaskFilter.tsx"],
+          "spec": "Component with status checkboxes (pending, in_progress, done) and search input. Updates URL query params.",
+          "acceptance": ["npm run typecheck", "npm test -- TaskFilter"],
+          "status": "pending"
+        }
+      ]
+    }
+  ]
+}
