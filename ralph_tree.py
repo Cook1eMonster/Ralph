@@ -630,7 +630,7 @@ def cmd_sync() -> None:
 
 
 def cmd_done() -> None:
-    """Mark current task as done."""
+    """Mark current task as done and extract learned patterns."""
     tree = load_tree()
     result = find_next_task(tree)
 
@@ -639,9 +639,34 @@ def cmd_done() -> None:
         return
 
     task, path = result
+
+    # === IMPROVEMENT 2: Extract Pattern After Task Completion ===
+    # Learn from what was just implemented to maintain consistency
+    modified_files = task.get("files", [])
+    if modified_files:
+        try:
+            from ralph_pattern_library import PatternLibrary
+            library = PatternLibrary(Path.cwd())
+
+            print(f"\nExtracting learned patterns from completed task...")
+            pattern = library.extract_pattern_from_task(
+                task_name=task.get("name", ""),
+                modified_files=modified_files
+            )
+
+            if pattern:
+                library.add_pattern(pattern)
+            else:
+                print("  No pattern extracted (task may be too simple)")
+
+        except ImportError:
+            pass  # Pattern library not available
+        except Exception as e:
+            print(f"  Note: Pattern extraction failed: {e}")
+
     mark_done(tree, path)
     save_tree(tree)
-    print(f"Marked done: {task.get('name')}")
+    print(f"\n✓ Marked done: {task.get('name')}")
 
     # Auto-reindex to keep embeddings fresh
     auto_reindex()
@@ -1619,14 +1644,19 @@ EXECUTION_LOG_FILE = "execution.log"
 
 def build_subagent_prompt(task: dict, path: list[str], tree: dict) -> str:
     """
-    Build a focused prompt for a fresh subagent.
-    Only includes essential context to maximize effective token usage.
+    Build a focused prompt for a fresh subagent with intelligent context compression.
+
+    Improvements:
+    1. Smart context compression using local AI (ralph_smart_context.py)
+    2. Proactive MCP integration (ralph_proactive_mcp.py)
+    3. Pattern library for consistency (ralph_pattern_library.py)
     """
     context = build_context(tree, path)
     read_first = task.get("read_first", [])
     spec = task.get("spec", "")
     files = task.get("files", [])
     acceptance = task.get("acceptance", [])
+    project_root = Path.cwd()
 
     prompt_parts = [
         "<task>",
@@ -1639,13 +1669,130 @@ def build_subagent_prompt(task: dict, path: list[str], tree: dict) -> str:
     prompt_parts.append("</task>")
     prompt_parts.append("")
 
+    # === IMPROVEMENT 1: Smart Context Compression ===
+    # Compress read_first files using local AI to save tokens
+    compressed_context = None
     if read_first:
+        try:
+            from ralph_smart_context import smart_compress_context
+            print("  Compressing context with local AI...")
+            compressed_context = smart_compress_context(
+                read_first_files=read_first,
+                task_description=task.get("name", ""),
+                project_root=project_root
+            )
+            print(f"    Context size: {compressed_context.get('context_size_reduction', 'N/A')}")
+        except ImportError:
+            print("  Note: ralph_smart_context.py not available, using standard context")
+        except Exception as e:
+            print(f"  Note: Context compression failed: {e}")
+
+    # Add compressed context or standard read_first
+    if compressed_context and (compressed_context.get("summaries") or compressed_context.get("patterns")):
+        # Use compressed context
+        if compressed_context.get("summaries"):
+            prompt_parts.append("<file_summaries>")
+            prompt_parts.append("AI-generated summaries of large files (read with Read tool for details):")
+            prompt_parts.append("")
+            for filepath, summary in compressed_context["summaries"].items():
+                prompt_parts.append(f"### {filepath}")
+                prompt_parts.append(summary)
+                prompt_parts.append("")
+            prompt_parts.append("</file_summaries>")
+            prompt_parts.append("")
+
+        if compressed_context.get("patterns"):
+            prompt_parts.append("<extracted_patterns>")
+            prompt_parts.append("Code patterns to follow (extracted from read_first files):")
+            prompt_parts.append("")
+            for filepath, patterns in compressed_context["patterns"].items():
+                prompt_parts.append(f"### {filepath}")
+                for key, value in patterns.items():
+                    if value:
+                        prompt_parts.append(f"**{key}:** {value}")
+                prompt_parts.append("")
+            prompt_parts.append("</extracted_patterns>")
+            prompt_parts.append("")
+
+        if compressed_context.get("key_snippets"):
+            prompt_parts.append("<reference_files>")
+            prompt_parts.append("Small files to read completely:")
+            for filepath in compressed_context["key_snippets"].keys():
+                prompt_parts.append(f"  - {filepath}")
+            prompt_parts.append("</reference_files>")
+            prompt_parts.append("")
+    elif read_first:
+        # Standard read_first (fallback)
         prompt_parts.append("<read_first>")
         prompt_parts.append("MANDATORY: Read these files BEFORE writing any code to understand existing patterns:")
         for f in read_first:
             prompt_parts.append(f"  - {f}")
         prompt_parts.append("</read_first>")
         prompt_parts.append("")
+
+    # === IMPROVEMENT 2: Pattern Library ===
+    # Add learned patterns from previous tasks
+    try:
+        from ralph_pattern_library import PatternLibrary
+        library = PatternLibrary(project_root)
+        relevant_patterns = library.find_relevant_patterns(
+            task_name=task.get("name", ""),
+            task_context=context,
+            top_k=3
+        )
+        if relevant_patterns:
+            print(f"    Found {len(relevant_patterns)} relevant patterns from past tasks")
+            prompt_parts.append("<learned_patterns>")
+            prompt_parts.append("Established patterns from previous tasks (maintain consistency):")
+            prompt_parts.append("")
+            for i, p in enumerate(relevant_patterns, 1):
+                prompt_parts.append(f"### Pattern {i}: {p['task']}")
+                prompt_parts.append(f"**Category:** {p['category']}")
+                prompt_parts.append(f"**Approach:** {p['pattern']}")
+                if p.get("example_code"):
+                    prompt_parts.append("**Example:**")
+                    prompt_parts.append("```")
+                    prompt_parts.append(p["example_code"][:300])
+                    prompt_parts.append("```")
+                prompt_parts.append("")
+            prompt_parts.append("</learned_patterns>")
+            prompt_parts.append("")
+    except ImportError:
+        pass  # Pattern library not available
+    except Exception as e:
+        print(f"  Note: Pattern library unavailable: {e}")
+
+    # === IMPROVEMENT 3: Proactive MCP ===
+    # Auto-fetch MCP context before spawning
+    try:
+        from ralph_proactive_mcp import auto_fetch_mcp_context
+        print("  Fetching MCP context...")
+        mcp_context = auto_fetch_mcp_context(task, project_root)
+
+        if mcp_context.get("similar_implementations"):
+            print(f"    Found {len(mcp_context['similar_implementations'])} similar implementations")
+            prompt_parts.append("<similar_implementations>")
+            prompt_parts.append("These files contain similar implementations:")
+            prompt_parts.append("")
+            for impl in mcp_context["similar_implementations"][:3]:
+                prompt_parts.append(f"### {impl['filepath']} ({impl['similarity']} similarity)")
+                prompt_parts.append(f"```\n{impl['snippet']}\n```")
+                prompt_parts.append("")
+            prompt_parts.append("</similar_implementations>")
+            prompt_parts.append("")
+
+        if mcp_context.get("suggested_files"):
+            print(f"    MCP suggested {len(mcp_context['suggested_files'])} additional files")
+            prompt_parts.append("<mcp_suggestions>")
+            prompt_parts.append("MCP suggests also reading (semantically related):")
+            for f in mcp_context["suggested_files"][:5]:
+                prompt_parts.append(f"  - {f}")
+            prompt_parts.append("</mcp_suggestions>")
+            prompt_parts.append("")
+    except ImportError:
+        pass  # MCP not available
+    except Exception as e:
+        print(f"  Note: MCP context unavailable: {e}")
 
     if files:
         prompt_parts.append("<files_to_modify>")
@@ -1669,14 +1816,15 @@ def build_subagent_prompt(task: dict, path: list[str], tree: dict) -> str:
         prompt_parts.append("")
 
     prompt_parts.append("<instructions>")
-    prompt_parts.append("1. Read ALL files listed in read_first to understand existing patterns")
-    prompt_parts.append("2. Implement the task according to the spec")
-    prompt_parts.append("3. Follow existing code conventions and patterns exactly")
-    prompt_parts.append("4. Run acceptance criteria commands to verify your work")
-    prompt_parts.append("5. If all checks pass, commit your changes:")
+    prompt_parts.append("1. Read ALL files listed (summaries provided, use Read tool for full content)")
+    prompt_parts.append("2. Follow the extracted patterns and learned patterns EXACTLY")
+    prompt_parts.append("3. Review similar implementations before coding")
+    prompt_parts.append("4. Implement the task according to the spec")
+    prompt_parts.append("5. Run acceptance criteria commands to verify your work")
+    prompt_parts.append("6. If all checks pass, commit your changes:")
     prompt_parts.append("   git add -A && git commit -m \"" + task.get('name', 'task')[:50] + "\"")
-    prompt_parts.append("6. When complete, output: TASK_COMPLETE")
-    prompt_parts.append("7. If blocked, output: TASK_BLOCKED: <reason>")
+    prompt_parts.append("7. When complete, output: TASK_COMPLETE")
+    prompt_parts.append("8. If blocked, output: TASK_BLOCKED: <reason>")
     prompt_parts.append("</instructions>")
 
     return "\n".join(prompt_parts)
@@ -1946,6 +2094,22 @@ def cmd_execute(verbose: bool = False, auto_done: bool = False, auto_merge: bool
     print(f"Mode: {'verbose (streaming)' if verbose else 'quiet (wait for completion)'}")
     print(f"Max fix attempts: {max_retries}")
     print("=" * 70)
+
+    # === IMPROVEMENT 3: MCP Pre-Validation Warnings ===
+    # Use MCP to catch potential issues before starting
+    try:
+        from ralph_proactive_mcp import mcp_pre_validate
+        warnings = mcp_pre_validate(task, project_root=Path.cwd())
+        if warnings:
+            print()
+            print("⚠️  MCP Pre-validation Warnings:")
+            for w in warnings:
+                print(f"   - {w}")
+            print()
+    except ImportError:
+        pass  # MCP not available
+    except Exception as e:
+        print(f"  Note: MCP pre-validation unavailable: {e}")
 
     prompt = build_subagent_prompt(task, path, tree)
     prompt_tokens = int(len(prompt) * TOKENS_PER_CHAR)
