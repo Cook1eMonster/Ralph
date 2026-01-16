@@ -5,15 +5,22 @@ __pycache__/
 .venv/
 venv/
 
-# Project files (user-specific)
+# Project files (user-specific) - legacy
 tree.json
 requirements.md
 progress.txt
 config.json
 workers.json
 
+# Projects data (per-project storage)
+projects/
+
 # AI Context (local index - can be large)
 .ralph_context/
+
+# Frontend build
+frontend/node_modules/
+frontend/dist/
 
 # IDE
 .idea/

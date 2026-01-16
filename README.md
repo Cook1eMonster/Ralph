@@ -18,7 +18,7 @@ A production planning system for autonomous AI coding agents. Inspired by [Ralph
 ║  └──────────┘        └───────────────┘         └──────────┘        ║
 ║                                                                    ║
 ║  Parts & materials   Organized workflows       Shipped to users    ║
-║  (dependencies)      (feature modules)         (~100k token tasks) ║
+║  (dependencies)      (feature modules)         (~60k token tasks)  ║
 ║                                                                    ║
 ╚════════════════════════════════════════════════════════════════════╝
 ```
@@ -26,7 +26,7 @@ A production planning system for autonomous AI coding agents. Inspired by [Ralph
 **Key concepts:**
 - **WAREHOUSE** = Core infrastructure everything depends on (database, auth, API framework, shared libs)
 - **ASSEMBLY LINES** = Organized workflows for building features (clinical, patient portal, scheduling)
-- **PRODUCTS** = Shippable units of work (~100k tokens, single deliverable)
+- **PRODUCTS** = Shippable units of work (~60k tokens, single deliverable)
 
 **Workflow:**
 ```
@@ -160,7 +160,7 @@ python ralph_tree.py done        # Ship it
 | Warehouse | Core infrastructure (database, auth, API, shared libs) |
 | Assembly Line | Feature module (clinical app, patient portal, integrations) |
 | Station | Sub-area within a line (patient assessment, scheduling) |
-| Product | Single shippable task (~100k tokens) |
+| Product | Single shippable task (~60k tokens) |
 | Shipped | Product is complete (code exists, tests pass) |
 | Backlog | Product not started |
 | On the Line | Product in progress |
@@ -235,13 +235,13 @@ Then ship:
 
 ## Product Sizing
 
-Target ~100k tokens per product:
+Target ~60k tokens per product:
 
 ```
-100k tokens ~=
-  - ~400 lines of code changes
-  - 2-4 files touched
-  - 15-25 tool calls
+60k tokens ~=
+  - ~250 lines of code changes
+  - 1-3 files touched
+  - 10-15 tool calls
   - Single, shippable outcome
 ```
 
